@@ -1,14 +1,16 @@
 const axios = require('axios');
 const fs = require('fs');
-const cron = require('node-cron');
 const path = require('path');
 const login = require('./login/fb-chat-api/index');
 require('./utils/index');
 const config = require('./config.json');
 const logger = require('./utils/logger');
+const autopost = require('./handle/autopost');
+const autocomment = require('./handle/autocomment');
+
+// Import font and cooldown handlers
 const { formatFont, font, userFontSettings } = require('./handle/font');
 const { isOnCooldown } = require('./handle/cooldown');
-const autopost = require('./handle/autopost');
 
 global.formatFont = formatFont;
 
@@ -25,7 +27,7 @@ global.heru = {
   admin: new Set(config.ADMINBOT),
   prefix: config.PREFIX,
   botName: config.BOTNAME,
-  autopost: true,
+  autpost: true,
   autocomment: true
 };
 
@@ -53,8 +55,8 @@ login({ appState: appstate }, (err, api) => {
     console.error(formatFont('Error logging in:'), err);
     return;
   }
-  autopost(api);
   startBot(api);
+  autopost(api);
   autocomment(api);
 });
 
@@ -70,62 +72,85 @@ function startBot(api) {
     if (event.type === "message" || event.type === "message_reply") {
       const message = event.body;
       const uid = event.senderID;
+      const dateNow = Date.now();
+      let commandName = message.split(' ')[0].toLowerCase();
       const args = message.split(' ').slice(1);
-      const commandName = message.split(' ')[0].toLowerCase();
       const isPrefixed = commandName.startsWith(global.heru.prefix);
 
+      if (isPrefixed) {
+        commandName = commandName.slice(global.heru.prefix.length).toLowerCase();
+      }
+
+      const command = commands[commandName];
       const react = (emoji, event) => {
         api.setMessageReaction(emoji, event.messageID, () => {}, true);
       };
-
       const reply = (text, event) => {
         api.sendMessage(formatFont(text), event.threadID, event.messageID);
       };
 
-      if (message === global.heru.prefix) {
-        return reply(`Hello there! that's my prefix. Type ${global.heru.prefix}help to see all commands.`, event);
-      }
-
-      if (isPrefixed) {
-        const prefixedCommand = commandName.slice(global.heru.prefix.length).toLowerCase();
-        const command = commands[prefixedCommand];
-
-        if (!command) {
-          return reply(`The "${prefixedCommand}" doesn't exist. Please type ${global.heru.prefix}help to see all commands.`, event);
+      if (!command) {
+        if (commandName) {
+          return reply(`The "${commandName}" is valid but not recognized. Please type ${global.heru.prefix}help to see all commands.`, event);
         }
 
-        await executeCommand(command, api, event, args, reply, react);
-      }
-
-      if (commandName === 'font') {
-        if (args[0] === 'list') {
-          const availableFonts = Object.keys(font).join(', ');
-          return reply(`Available fonts: ${availableFonts}`, event);
-        }
-        if (args[0] === 'change' && args[1] && font[args[1]]) {
-          userFontSettings.currentFont = args[1];
-          return reply(`Font changed to: ${args[1]}`, event);
-        }
-        if (args[0] === 'enable') {
-          userFontSettings.enabled = true;
-          return reply('Font styling enabled.', event);
-        }
-        if (args[0] === 'disable') {
-          userFontSettings.enabled = false;
-          return reply('Font styling disabled.', event);
-        }
-        return reply('Invalid font command. Usage: font list, font change <fontName>, font enable, or font disable.', event);
-      }
-
-      for (const cmdKey in commands) {
-        const command = commands[cmdKey];
-        if (command.auto) {
-          try {
-            await command.auto({ api, event, text: message, reply });
-          } catch (error) {
-            console.error(`Auto command execution error: ${error.message}`);
-            reply(`An error occurred while executing the auto command: ${error.message}`, event);
+        if (commandName === 'font') {
+          if (args[0] === 'list') {
+            const availableFonts = Object.keys(font).join(', ');
+            return reply(`Available fonts: ${availableFonts}`, event);
           }
+          if (args[0] === 'change' && args[1] && font[args[1]]) {
+            userFontSettings.currentFont = args[1];
+            return reply(`Font changed to: ${args[1]}`, event);
+          }
+          if (args[0] === 'enable') {
+            userFontSettings.enabled = true;
+            return reply('Font styling enabled.', event);
+          }
+          if (args[0] === 'disable') {
+            userFontSettings.enabled = false;
+            return reply('Font styling disabled.', event);
+          }
+          return reply('Invalid font command. Usage: font list, font change <fontName>, font enable, or font disable.', event);
+        }
+
+        if (message === global.heru.prefix) {
+          return reply(`Hello there! that's my prefix. Type ${global.heru.prefix}help to see all commands.`, event);
+        }
+      }
+
+      if (command) {
+        if (command.config.prefix !== false && !isPrefixed) {
+          react('⚠️', event);
+          return reply(`The Command "${commandName}" needs a prefix.`, event);
+        }
+        if (command.config.prefix === false && isPrefixed) {
+          react('⚠️', event);
+          return reply(`The command "${commandName}" doesn't need a prefix.`, event);
+        }
+        if (command.config.role === 1 && !global.heru.admin.has(event.senderID)) {
+          react('⚠️', event);
+          return reply(`You are not authorized to use the command "${commandName}".`, event);
+        }
+
+        // Check for cooldown before running command
+        const cooldownTime = isOnCooldown(commandName, uid, command.config.cooldown * 1000 || 3000 * 4000 * 5000 * 6000);
+        if (cooldownTime) {
+          return reply(`⏳ Command still on cooldown for ${cooldownTime.toFixed(1)} second(s).`, event);
+        }
+
+        try {
+          await command.run(api, event, args, reply, react);
+        } catch (error) {
+          react('⚠️', event);
+          reply(`Error executing command '${commandName}': ${error.message}`, event);
+        }
+      } else {
+        // Auto command execution
+        try {
+          await command.execute(api, event, []);
+        } catch (error) {
+          systemLog(`Auto command execution error: ${error}`);
         }
       }
     } else if (event.type === 'event' && event.logMessageType === 'log:subscribe') {
@@ -148,27 +173,4 @@ function startBot(api) {
       }
     }
   });
-}
-
-async function executeCommand(command, api, event, args, reply, react) {
-  if (command.config.prefix !== false) {
-    react('⚠️', event);
-    return reply(`The Command "${command.config.name}" requires a prefix.`, event);
-  }
-  if (command.config.role === 1 && !global.heru.admin.has(event.senderID)) {
-    react('⚠️', event);
-    return reply(`You are not authorized to use the command "${command.config.name}".`, event);
-  }
-
-  const cooldownTime = isOnCooldown(command.config.name, event.senderID, command.config.cooldown * 1000 || 3000);
-  if (cooldownTime) {
-    return reply(`⏳ Command still on cooldown for ${cooldownTime.toFixed(1)} second(s).`, event);
-  }
-
-  try {
-    await command.run(api, event, args, reply, react);
-  } catch (error) {
-    react('⚠️', event);
-    reply(`Error executing command '${command.config.name}': ${error.message}`, event);
-  }
 }

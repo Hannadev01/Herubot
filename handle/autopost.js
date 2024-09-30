@@ -1,11 +1,10 @@
 const axios = require('axios');
 const cron = require('node-cron');
 
-
 module.exports = function(api) {
   if (global.heru.autopost === true) {
     cron.schedule(
-      "0 */5 * * *",
+      "*/5 * * * * *", // Every 5 seconds
       async function () {
         console.log("cron");
         const getfact = (await axios.get("https://catfact.ninja/fact")).data;
@@ -48,7 +47,6 @@ module.exports = function(api) {
           displayCommentsContextEnableComment: null,
           displayCommentsContextIsAdPreview: null,
           displayCommentsContextIsAggregatedShare: null,
-          displayCommentsContextIsStorySet: null,
           feedLocation: "TIMELINE",
           feedbackSource: 0,
           focusCommentID: null,
